@@ -1,0 +1,288 @@
+#Pipeline for assembly of metagenomes - includes multiple binning methods and a way to compare between binning methods 
+#Dependencies 
+  #Trimmomatic - http://www.usadellab.org/cms/?page=trimmomatic
+  #bbsuite/bbmap/bbnorm - https://sourceforge.net/projects/bbmap/
+  #Spades - https://github.com/ablab/spades
+  #Anvio - https://anvio.org/install/
+  #Concoct - https://concoct.readthedocs.io/en/latest/
+  #Metabat - https://bitbucket.org/berkeleylab/metabat/src
+  #DasTool - https://github.com/cmks/DAS_Tool
+  #Checkm - https://ecogenomics.github.io/CheckM/
+  
+#Pipeline was run working in conda environments 
+
+# Move to folder with the fastq.gz files and Unzip the files 
+gunzip *.gz
+
+#Concatenate files - multiple sequence runs on the same samples L001, L002, L003, L004 - combine them together 
+cat S1-010_S34_L00?_R1* > S1-010_R1_combined.fastq
+cat S1-010_S34_L00?_R2* > S1-010_R2_combined.fastq
+#repeat for each sample 
+
+#move files to combined fastas folder 
+mv *_combined.fastq combined_fastas
+
+# Normalize k-mers using bbnorm - working in conda environment bbmap - need to run each sample individually or create a loop because bbnorm can't accept wildcard character inputs 
+# https://sourceforge.net/projects/bbmap/
+conda activate bbmap
+bbnorm.sh in1=S1-010_R1_combined.fastq in2=S1-010_R2_combined.fastq out1=S1-010_R1_norm.fastq out2=S1-010_R2_norm.fastq target=30 min=3 kmer=21
+#repeat for each sample 
+
+mv *_norm* norm_fastas/
+cd norm_fastas/
+
+conda deactivate
+conda activate trimmomatic
+
+#trim sequences for quality - in trimmomatic conda environment 
+http://www.usadellab.org/cms/?page=trimmomatic
+#Running trimmomatic in a for loop - instructions here https://github.com/raynamharris/Shell_Intro_for_Bioinformatics_STG/blob/master/lessons/06_ForLoops.md
+#working in folder with the normalized sequences 
+#check that loop is working and gives you back the correctly named files 
+for R1 in *R1*
+do
+   R2=${R1//R1_norm.fastq/R2_norm.fastq}
+   R1paired=${R1//.fastq/_paired.fastq.gz}
+   R1unpaired=${R1//.fastq/_unpaired.fastq.gz}	
+   R2paired=${R2//.fastq/_paired.fastq.gz}
+   R2unpaired=${R2//.fastq/_unpaired.fastq.gz}	
+   echo $R1 $R2 $R1paired $R1unpaired $R2paired $R2unpaired
+done
+
+#now actually run trimmomatic 
+for R1 in *R1*
+do
+R2=${R1//R1_norm.fastq/R2_norm.fastq}
+   R1paired=${R1//.fastq/_paired.fastq.gz}
+   R1unpaired=${R1//.fastq/_unpaired.fastq.gz}	
+   R2paired=${R2//.fastq/_paired.fastq.gz}
+   R2unpaired=${R2//.fastq/_unpaired.fastq.gz}
+trimmomatic PE $R1 $R2 $R1paired $R1unpaired $R2paired $R2unpaired LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36
+done
+
+#Co-assemble the samples together using SPADES - https://github.com/ablab/spades
+#to do a co-assembly you have to run without the meta flag 
+spades.py --pe1-1 PNEGx_R1_norm_paired.fastq.gz --pe1-2 PNEGx_R2_norm_paired.fastq.gz --pe2-1 S1-010_R1_norm_paired.fastq.gz --pe2-2 S1-010_R2_norm_paired.fastq.gz --pe3-1 S1-2030_R1_norm_paired.fastq.gz --pe3-2 S1-2030_R2_norm_paired.fastq.gz --pe4-1 S3-010_R1_norm_paired.fastq.gz --pe4-2 S3-010_R2_norm_paired.fastq.gz --pe5-1 S3-2030_R1_norm_paired.fastq.gz --pe5-2 S3-2030_R2_norm_paired.fastq.gz --pe6-1 S3-3040_R1_norm_paired.fastq.gz --pe6-2 S3-3040_R2_norm_paired.fastq.gz -o Co-assembly_bbmap
+
+#Simplify names in the contigs fasta headers 
+anvi-script-reformat-fasta ./contigs.fasta -o coassembled_contigs.fasta -l 0 --simplify-names -r header_name_file.txt
+
+#map each sample to the co-assembly using bbmap 
+bbmap.sh in1=../S1-010_R1_norm_paired.fastq.gz in2=../S1-010_R2_norm_paired.fastq.gz ref=./coassembled_contigs.fasta out=./bbmap_mapping/S1_010_anvio_bbmap_mapped.sam covstats=./bbmap_mapping/S1_010_anvio_bbmap_constats.txt basecov=./bbmap_mapping/S1_010_anvio_bbmap_basecov.txt bincov=./bbmap_mapping/S1_010_anvio_bbmap_bincov.txt
+
+#repeat for each sample (could also try and run in a loop) 
+
+#convert sam to bam and sort and index 
+
+samtools view -bS S1_010_anvio_bbmap_mapped.sam > S1_010-RAW.bam
+samtools sort S1_010-RAW.bam > S1_010_anvio_bbmap.bam
+samtools index S1_010_anvio_bbmap.bam 
+rm S1_010-RAW.bam 
+#repeat for all samples
+
+#Create contigs database 
+anvi-gen-contigs-database -f coassembled_contigs.fasta -o coassembled_bbmap_contigs.db -n bbmap_coassembly
+
+#Identify single copy core genes 
+anvi-run-hmms -c coassembled_bbmap_contigs.db 
+
+#Take a look at the database created 
+anvi-display-contigs-stats coassembled_bbmap_contigs.db --server-only -P 8089
+#After running this, if running on a server, you need to go to local browser window and input http://localhost:8089 into the url. You must have logged into the server using ssh -L 8089:localhost:8089 cwood@10.0.151.125. 
+
+#annotate genes using ncbi-cogs
+anvi-run-ncbi-cogs -c coassembled_bbmap_contigs.db
+
+
+#create profile databases 
+for sample in `awk '{print $1}' ./samples2.txt`
+do
+    if [ "$sample" == "sample" ]; then continue; fi
+
+	anvi-profile -i bbmap_mapping/$sample.bam -c coassembled_bbmap_contigs.db --sample-name $sample --output-dir profile_$sample
+	
+done
+
+
+conda activate anvio-7.1
+anvi-migrate profile*/*.db --migrate-dbs-safely
+#Merge profiles 
+anvi-merge profile_*/PROFILE.db -o SAMPLES-MERGED -c ./coassembled_bbmap_contigs.db
+
+
+#Binning using three different methods 
+
+#Binning method 1 - binning with built in anvio metabat 
+#must have the metabat conda environment active if that’s how you installed metabat, otherwise have it on system path 
+anvi-cluster-contigs -p SAMPLES-MERGED/PROFILE.db -c ./coassembled_bbmap_contigs.db -C bbmap_Metabat2 --driver metabat2 --just-do-it
+
+#during the merge step there were too many splits and so anvio could not generate a hierchical clustering
+#can run anvi-interactive in collection mode 
+
+#visualize the bins 
+anvi-interactive -p SAMPLES-MERGED/PROFILE.db -c coassembled_bbmap_contigs.db -C bbmap_Metabat2 --server-only -P 8087
+
+#summarize info from metabat2 collection
+anvi-summarize -p SAMPLES-MERGED/PROFILE.db -c coassembled_bbmap_contigs.db -o bbmap_Metabat_summary -C bbmap_Metabat2
+
+conda activate checkm
+checkm lineage_wf -x fa . ./checkm
+checkm qa ./lineage.ms . -f manual_metabat_bins_checkm.txt
+
+#Run GTDB on the bins - working in the fastas directory that you just created  
+gtdbtk identify --genome_dir . --out_dir gtdbk_identify --extension fa --cpus 5 --prefix manual_bbmap_metabat --force
+gtdbtk align --identify_dir gtdbk_identify/ --out gtdbk_align --cpus 5 --prefix manual_bbmap_metabat
+gtdbtk classify --genome_dir . --align_dir gtdbk_align/ --out_dir gtdbk_classify -x fa --cpus 5 --scratch_dir scratch --prefix manual_bbmap_metabat
+
+
+#Binning method 2 - binning with built in anvio concoct 
+anvi-cluster-contigs -p SAMPLES-MERGED/PROFILE.db -c ./coassembled_bbmap_contigs.db -C Concoct --driver concoct --just-do-it
+anvi-summarize -p SAMPLES-MERGED/PROFILE.db -c coassembled_bbmap_contigs.db -o bbmap_Concoct_summary -C Concoct
+mkdir fastas
+cp Bin_*/*.fa fastas/
+
+conda activate checkm
+checkm lineage_wf -x fa . ./checkm
+checkm qa ./lineage.ms . -f anvio_concoct_bins_checkm.txt
+
+#Run GTDB on the bins - working in the fastas directory that you just created  
+gtdbtk identify --genome_dir . --out_dir gtdbk_identify --extension fa --cpus 5 --prefix anvio_bbmap_concoct --force
+gtdbtk align --identify_dir gtdbk_identify/ --out gtdbk_align --cpus 5 --prefix anvio_bbmap_concoct
+gtdbtk classify --genome_dir . --align_dir gtdbk_align/ --out_dir gtdbk_classify -x fa --cpus 5 --scratch_dir scratch --prefix anvio_bbmap_concoct
+
+
+#Binning method 3 - binning with metabat outside of anvio and then import into anvio 
+#use the co-assembled fasta from the SPADEs co-assembly as input and then all the individual bam files from the bbmap mapping 
+
+runMetaBat.sh --unbinned -v -m 1500 ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/coassembled_contigs.fasta /home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/bbmap_mapping/PNEGx_anvio_bbmap.bam /home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/bbmap_mapping/S1_010_anvio_bbmap.bam /home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/bbmap_mapping/S1_2030_anvio_bbmap.bam /home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/bbmap_mapping/S3_010_anvio_bbmap.bam /home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/bbmap_mapping/S3_2030_anvio_bbmap.bam /home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/bbmap_mapping/S3_3040_anvio_bbmap.bam > metabatALLlog.txt
+
+#import the bins that were just created to anvio 
+conda activate mypython3.8
+python ~/bin_output.py -f . -e .fa -o manual_metabat_bins.txt
+sed 's/\./_/g' manual_metabat_bins.txt > manual_metabat_bins_fixed.txt
+
+anvi-import-collection /home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/manual_metabat/coassembled_contigs.fasta.metabat-bins1500-20220504_112757/manual_metabat_bins_fixed.txt -p ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/SAMPLES-MERGED/PROFILE.db -c ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/coassembled_bbmap_contigs.db -C manual_metabat_bins --contigs-mode
+
+#look at the bins - yay! The other stuff all ended up in the unbinned bin 
+anvi-interactive -p SAMPLES-MERGED/PROFILE.db -c coassembled_bbmap_contigs.db -C manual_metabat_bins --server-only -P 8081
+
+#Runnning Das Tool 
+#Try using Das Tool to combine results from multiple binning softwares to improve the quality of the bins
+#need to have a tabular file with fasta/bin information
+
+#locations of the tabular input files 
+#for manual metabat bins 
+~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/manual_metabat/coassembled_contigs.fasta.metabat-bins1500-20220504_112757/manual_metabat_bins_fixed.txt
+
+#For anvio metabat bins - make the tabular file 
+python ~/bin_output.py -f . -e .fa -o anvio_metabat_bins.txt
+sed 's/\./_/g' anvio_metabat_bins.txt > anvio_metabat_bins_fixed.txt
+
+/home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/bbmap_Metabat_summary/bin_by_bin/fastas/anvio_metabat_bins_fixed.txt
+
+#for concoct bins
+python ~/bin_output.py -f . -e .fa -o anvio_concoct_bins.txt
+sed 's/\./_/g'  anvio_concoct_bins.txt > anvio_concoct_bins_fixed.txt
+
+/home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/bbmap_Concoct_summary/bin_by_bin/fastas/anvio_concoct_bins_fixed.txt
+
+
+#Run Das_Tool 
+conda activate dastool
+
+DAS_Tool -i ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/manual_metabat/coassembled_contigs.fasta.metabat-bins1500-20220504_112757/manual_metabat_bins_fixed.txt,/home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/bbmap_Metabat_summary/bin_by_bin/fastas/anvio_metabat_bins_fixed.txt,/home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/bbmap_Concoct_summary/bin_by_bin/fastas/anvio_concoct_bins_fixed.txt -l manual_metabat,anvio_metabat,anvio_concoct -c /home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/coassembled_contigs.fasta -o dastool --write_bin_evals --write_bins
+
+#Das tool summary output shows two bins kept 
+#run checkm on those bins
+#run gtdb on those bins
+
+gtdbtk identify --genome_dir . --out_dir gtdbk_identify --extension fa --cpus 5 --prefix dastool_1 --force
+gtdbtk align --identify_dir gtdbk_identify/ --out gtdbk_align --cpus 5 --prefix dastool_1
+gtdbtk classify --genome_dir . --align_dir gtdbk_align/ --out_dir gtdbk_classify -x fa --cpus 5 --scratch_dir scratch --prefix dastool_1
+
+#import dastool bins into anvio
+anvi-import-collection /home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/dastool/dastool_DASTool_contig2bin.tsv -p ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/SAMPLES-MERGED/PROFILE.db -c ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/coassembled_bbmap_contigs.db -C dastool_bins --contigs-mode
+
+
+#Use anvio to predict taxonomy - anvio uses GTDB
+#this allows taxonomy to be visualized in the anvi-interactive/anvi-refine interfaces 
+anvi-estimate-scg-taxonomy -c coassembled_bbmap_contigs.db -p SAMPLES-MERGED/PROFILE.db --metagenome-mode --compute-scg-coverages
+
+
+#creating an alluvial diagram of binning results and where they ended up 
+#first need to export anvio collections 
+
+anvi-export-collection -C Concoct -p SAMPLES-MERGED/PROFILE.db --include-unbinned
+anvi-export-collection -C bbmap_Metabat2 -p SAMPLES-MERGED/PROFILE.db --include-unbinned
+anvi-export-collection -C manual_metabat_bins -p SAMPLES-MERGED/PROFILE.db --include-unbinned
+anvi-export-collection -C dastool_bins -p SAMPLES-MERGED/PROFILE.db --include-unbinned
+
+##to run anvi-script-gen-alluvial.py
+#Download/copy script from https://gist.github.com/meren/d2d046bb3f16429c95ba9cb4778b36f9
+#Need to edit the script in the algorithms section to have the file names of your exported collections. 
+
+#then to run the script need to flag which algorithm to base it off of and which bin you want to export. This will output a csv file with each contig name and then which bin each contig is in for each binning method. 
+python anvi-script-gen-alluvial.py --algorithm MANUAL_METABAT --bin bin_9_fa > manual_metabat_9.txt
+
+#input the file that was created into https://app.rawgraphs.io/ to create an alluvial graph 
+
+
+conda activate checkm
+checkm lineage_wf -x fa . ./checkm
+checkm qa ./lineage.ms . -f manual_metabat_bins_checkm.txt
+
+#Run GTDB on the bins - working in the fastas directory that you just created  
+gtdbtk identify --genome_dir . --out_dir gtdbk_identify --extension fa --cpus 5 --prefix manual_bbmap_metabat --force
+gtdbtk align --identify_dir gtdbk_identify/ --out gtdbk_align --cpus 5 --prefix manual_bbmap_metabat
+gtdbtk classify --genome_dir . --align_dir gtdbk_align/ --out_dir gtdbk_classify -x fa --cpus 5 --scratch_dir scratch --prefix manual_bbmap_metabat
+
+#manually refine with Anvio 
+#move the final bins to a folder called FINAL_BIN
+#
+
+#create a file to be able to import final bins into anvio 
+conda activate mypython3.8
+python ~/bin_output.py -f . -e .fa -o final_bins_RAW.txt
+sed 's/\./_/g' final_bins_RAW.txt > final_bins.txt
+
+#run checkm on final bins
+checkm lineage_wf -x fa . ./checkm
+checkm qa ./lineage.ms . -f final_bins_checkm.txt
+
+#import final bins into anvio 
+anvi-import-collection /home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/FINAL_BINS/final_bins.txt -p ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/SAMPLES-MERGED/PROFILE.db -c ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/coassembled_bbmap_contigs.db -C final_bins --contigs-mode
+
+#create summary of bins using anvio 
+anvi-summarize -p SAMPLES-MERGED/PROFILE.db -C final_bins -c coassembled_bbmap_contigs.db -o final_bins_summary
+
+
+#inculde the bins that were not identified as well as the unbinned stuff 
+checkm lineage_wf -x fa . ./checkm2
+checkm qa ./lineage.ms . -f final_bins_all_checkm.txt
+
+#import all the bins into anvio so that its all in one collection 
+python ~/bin_output.py -f . -e .fa -o final_all_bins_RAW.txt
+sed 's/\./_/g' final_all_bins_RAW.txt > final_all_bins.txt
+
+
+anvi-import-collection /home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/FINAL_BINS/final_all_bins.txt -p ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/SAMPLES-MERGED/PROFILE.db -c ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/coassembled_bbmap_contigs.db -C all_bins --contigs-mode
+
+
+#identify with the new gtdb database version 207 
+gtdbtk identify --genome_dir . --out_dir gtdbk_identify --extension fa --cpus 5 --prefix final_bins --force
+gtdbtk align --identify_dir gtdbk_identify/ --out gtdbk_align --cpus 5 --prefix final_bins
+gtdbtk classify --genome_dir . --align_dir gtdbk_align/ --out_dir gtdbk_classify -x fa --cpus 5 --scratch_dir scratch --prefix final_bins
+
+
+#import all the bins into anvio so that its all in one collection 
+python ~/bin_output.py -f . -e .fa -o final_all_bins_RAW.txt
+sed 's/\./_/g' final_all_bins_RAW.txt > final_all_bins_noneg.txt
+
+
+anvi-import-collection /home/cwood/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/FINAL_BINS/final_all_bins_noneg.txt -p ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/SAMPLES-MERGED/PROFILE.db -c ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/coassembled_bbmap_contigs.db -C all_bins_negremoved --contigs-mode
+
+anvi-import-collection /home/cwood/GoordialMetaG/combined_fastas/norm_fastas/FINAL_BINS_v2/final_all_bins_noneg_edited.txt -p ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/SAMPLES-MERGED/PROFILE.db -c ~/GoordialMetaG/combined_fastas/norm_fastas/Co-assembly_bbmap/coassembled_bbmap_contigs.db -C all_bins_negremoved --contigs-mode
+
+#re-run anvi-summarize to get stats for all bins 
+anvi-summarize -p SAMPLES-MERGED/PROFILE.db -C all_bins -c coassembled_bbmap_contigs.db -o all_final_bins_summary
+
