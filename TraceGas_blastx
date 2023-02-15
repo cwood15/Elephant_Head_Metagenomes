@@ -1,0 +1,26 @@
+#Searching for Trace gas genes 
+
+#Looking for greening genes using diamond blastx 
+#Link to the Greening database - https://bridges.monash.edu/articles/online_resource/Compiled_Greening_lab_metabolic_marker_gene_databases/14431208?backTo=/collections/Greening_lab_metabolic_marker_gene_databases/5230745?backTo=/collections/Greening_lab_metabolic_marker_gene_databases/5230745?backTo=/collections/Greening_lab_metabolic_marker_gene_databases/5230745?backTo=/collections/Greening_lab_metabolic_marker_gene_databases/5230745
+
+conda install -c bioconda diamond
+#download the greening database 
+cat *.fasta > combined_greening_database.fasta
+#build the database from the concatenated fasta file which contains the genes from the greening database
+diamond makedb --in combined_greening_database.fasta --db greening_db
+
+#can also make individual databases per gene 
+##remove spaces from the headers so that the whole name is output to the database
+diamond makedb --in NiFe_hydrogenase.fasta --db NiFe_db
+diamond makedb --in Carbon_monoxide_dehydrogenase_CoxL.fasta --db CoxL_db
+
+
+#concatenate the ffn files from prokka which have the dna sequences annotated 
+
+
+#blastx
+diamond blastx --db MmoA_db --query ../../P2hybrid/P2ProkkaHibrid/P2Prokka_DNA.ffn -o Matches_blastx/blastx_P2_MmoA_matches_80.txt --query-cover 80 
+diamond blastx --db Nife_db --query ../../P2hybrid/P2ProkkaHibrid/P2Prokka_DNA.ffn -o Matches_blastx/blastx_P2_NiFe_matches_80.txt --query-cover 80 
+diamond blastx --db CoxL_db --query ../../P2hybrid/P2ProkkaHibrid/P2Prokka_DNA.ffn -o Matches_blastx/blastx_P2_CoxL_matches_80.txt --query-cover 80
+diamond blastx --db PmoA_db --query ../../P2hybrid/P2ProkkaHibrid/P2Prokka_DNA.ffn -o Matches_blastx/blastx_P2_PmoA_matches_80.txt --query-cover 80  
+diamond blastx --db greening_db --query ../../P2hybrid/P2ProkkaHibrid/P2Prokka_DNA.ffn -o Matches_blastx/blastx_P2_greening_matches_80.txt --query-cover 80 
